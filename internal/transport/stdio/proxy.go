@@ -104,6 +104,21 @@ func Run(ctx context.Context, cfg Config) error {
 	agentEnc := protocol.NewEncoder(cfg.AgentOut)
 	serverEnc := protocol.NewEncoder(serverIn)
 
+	// A plain io.Reader's blocking Read is not interruptible by ctx alone: if
+	// the child dies while the agent->server pump is blocked waiting for the
+	// next request (the agent has gone quiet, not closed its input), nothing
+	// above would ever wake it and wg.Wait below would hang forever. Closing
+	// AgentIn once ctx is done — whether because the caller cancelled it or
+	// because the server->agent pump noticed the child died — turns that
+	// blocked read into an error and lets the pump return. os.Stdin, the
+	// production AgentIn, is exactly such a closer.
+	if closer, ok := cfg.AgentIn.(io.Closer); ok {
+		go func() {
+			<-ctx.Done()
+			_ = closer.Close()
+		}()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 

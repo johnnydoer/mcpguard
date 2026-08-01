@@ -139,11 +139,20 @@ func TestIntegrationLargeResponseSurvivesFraming(t *testing.T) {
 }
 
 func TestIntegrationChildCrashDoesNotHangTheAgent(t *testing.T) {
-	// If the supervisor does not notice the child died, the agent waits forever.
-	// A clean return is the pass condition; the test's own timeout is the failure.
+	// AgentIn must never reach EOF on its own here: a finite reader would let
+	// the agent->server pump unwind by itself once exhausted, passing this
+	// test regardless of whether the crash was ever noticed. An io.Pipe whose
+	// write side is held open — no further writes, never closed — blocks any
+	// read indefinitely, so the only way Run can return is through the
+	// cancellation path the server->agent goroutine triggers when it notices
+	// the child died. If the supervisor does not notice, Run hangs forever
+	// and the test's own timeout is the failure, not an assertion.
 	bin := buildFakeServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
+	agentInR, agentInW := io.Pipe()
+	t.Cleanup(func() { _ = agentInW.Close() })
 
 	var agentOut bytes.Buffer
 	done := make(chan error, 1)
@@ -151,11 +160,15 @@ func TestIntegrationChildCrashDoesNotHangTheAgent(t *testing.T) {
 		done <- Run(ctx, Config{
 			Command:     []string{bin},
 			Interceptor: PassthroughInterceptor{},
-			AgentIn:     strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"crash"}` + "\n"),
+			AgentIn:     agentInR,
 			AgentOut:    &agentOut,
 			Stderr:      io.Discard,
 		})
 	}()
+
+	if _, err := agentInW.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"crash"}` + "\n")); err != nil {
+		t.Fatalf("writing crash trigger: %v", err)
+	}
 
 	select {
 	case <-done:
