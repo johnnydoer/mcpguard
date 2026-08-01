@@ -6,3 +6,6 @@ coverage.*
 # Fuzz corpora are large and machine-specific; the seed corpus in testdata/ is committed.
 /internal/**/testdata/fuzz/
 .DS_Store
+
+# SDD scratch: ledger, briefs, review packages
+.superpowers/
