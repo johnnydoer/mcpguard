@@ -1,0 +1,35 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck        # an unchecked error in a policy engine is a security bug
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec           # security-focused static analysis
+    - bodyclose
+    - errorlint
+    - exhaustive      # a missing switch case over Action would silently fall through
+    - nilerr
+    - noctx
+    - revive
+
+  settings:
+    exhaustive:
+      # A switch over policy.Action that omits a case must fail the build, not
+      # default to something. This is the single most valuable lint here.
+      default-signifies-exhaustive: false
+    gosec:
+      excludes:
+        # G204: mcpguard's entire purpose is spawning a subprocess from config.
+        # The command comes from a local trusted config file, not user input.
+        - G204
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck]
+
+formatters:
+  enable: [gofmt, goimports]
