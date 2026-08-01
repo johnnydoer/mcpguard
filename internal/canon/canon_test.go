@@ -192,3 +192,35 @@ func TestFileURIPathRejectsNonFileScheme(t *testing.T) {
 		t.Error("expected an error for a non-file scheme")
 	}
 }
+
+func TestFileURIPathRejectsNonEmptyAuthority(t *testing.T) {
+	// net/url splits a non-empty authority into u.Host and drops it from
+	// u.Path. RFC 8089 file-URI parsing is inconsistent across implementations
+	// -- some loose parsers reattach the authority to the path instead of
+	// erroring -- so a host we cannot interpret must be rejected, not
+	// silently discarded.
+	for _, raw := range []string{
+		"file://srv/data/public/x",
+		"file://etc/shadow",
+	} {
+		if _, err := FileURIPath(raw); !errors.Is(err, ErrInvalid) {
+			t.Errorf("FileURIPath(%q) err = %v, want ErrInvalid", raw, err)
+		}
+	}
+}
+
+func TestFileURIPathAcceptsEmptyOrLocalhostAuthority(t *testing.T) {
+	for raw, want := range map[string]string{
+		"file:///srv/data/public/x":          "/srv/data/public/x",
+		"file://localhost/srv/data/public/x": "/srv/data/public/x",
+	} {
+		got, err := FileURIPath(raw)
+		if err != nil {
+			t.Errorf("FileURIPath(%q): %v", raw, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("FileURIPath(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

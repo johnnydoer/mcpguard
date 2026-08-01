@@ -155,6 +155,16 @@ func URL(raw string) (string, error) {
 //
 // resources/read addresses resources by URI, and for file URIs the meaningful
 // policy surface is the underlying path.
+//
+// A non-empty authority other than "localhost" is rejected rather than
+// discarded: net/url splits it into u.Host and drops it from u.Path, but
+// RFC 8089 file-URI parsing is inconsistent across implementations — some
+// loose parsers reattach a non-empty authority to the path instead of
+// erroring. Silently stripping it here would let mcpguard authorize a
+// host-stripped path while whatever actually opens the resource resolves a
+// different one, the same parser-differential class this package rejects
+// for symlinks. Only an empty authority ("file:///path") or the literal
+// "localhost" unambiguously denote the local filesystem.
 func FileURIPath(raw string) (string, error) {
 	if raw == "" {
 		return "", ErrEmpty
@@ -165,6 +175,9 @@ func FileURIPath(raw string) (string, error) {
 	}
 	if strings.ToLower(u.Scheme) != "file" {
 		return "", fmt.Errorf("%w: expected a file:// URI, got scheme %q", ErrInvalid, u.Scheme)
+	}
+	if u.Host != "" && strings.ToLower(u.Host) != "localhost" {
+		return "", fmt.Errorf("%w: file URI has non-local authority %q", ErrInvalid, u.Host)
 	}
 
 	// url.Parse has already percent-decoded u.Path, so Path's traversal check
