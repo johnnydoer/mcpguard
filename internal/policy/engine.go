@@ -104,6 +104,19 @@ func (e *Engine) Evaluate(req Request) Decision {
 	}
 }
 
+// RuleTargets reports whether rule applies to this server and tool, ignoring
+// argument matchers.
+//
+// Exported so `mcpguard explain` can ask the engine the real question instead
+// of re-implementing server/tool matching for display. A debugging tool that
+// duplicates this logic can silently drift from it and misreport which rules
+// were even candidates — worse than not showing candidates at all. This is a
+// thin delegation with no logic of its own, so it stays behaviour-identical
+// to ruleTargets by construction.
+func (e *Engine) RuleTargets(rule Rule, server, tool string) bool {
+	return e.ruleTargets(rule, server, tool)
+}
+
 // ruleTargets reports whether a rule applies to this server and tool, ignoring
 // argument matchers.
 func (e *Engine) ruleTargets(rule Rule, server, tool string) bool {
