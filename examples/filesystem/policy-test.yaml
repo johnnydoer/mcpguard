@@ -1,0 +1,55 @@
+apiVersion: mcpguard.dev/v1
+kind: PolicyTest
+policy: mcpguard.yaml
+cases:
+  - name: public read is allowed
+    server: filesystem
+    tool: read_file
+    args: { path: /srv/data/public/report.txt }
+    expect: allow
+    expect_rule: allow-public-reads
+
+  - name: read outside the public tree falls through to default deny
+    server: filesystem
+    tool: read_file
+    args: { path: /srv/data/private/salaries.csv }
+    expect: deny
+    expect_rule: ""
+
+  - name: traversal out of the public prefix is denied
+    server: filesystem
+    tool: read_file
+    args: { path: /srv/data/public/../../etc/shadow }
+    expect: deny
+
+  - name: relative path is denied because it cannot be canonicalized
+    server: filesystem
+    tool: read_file
+    args: { path: public/report.txt }
+    expect: deny
+
+  - name: array-typed path does not bypass the string matcher
+    server: filesystem
+    tool: read_file
+    args: { path: ["/srv/data/public/ok.txt", "/etc/shadow"] }
+    expect: deny
+
+  - name: unnamed argument is rejected
+    server: filesystem
+    tool: read_file
+    args: { path: /srv/data/public/ok.txt, follow_symlinks: true }
+    expect: deny
+
+  - name: write requires approval
+    server: filesystem
+    tool: write_file
+    args: { path: /srv/data/public/new.txt, content: hello }
+    expect: approve
+    expect_rule: approve-writes
+
+  - name: delete is denied by its own rule, not by default
+    server: filesystem
+    tool: delete_file
+    args: { path: /srv/data/public/ok.txt }
+    expect: deny
+    expect_rule: deny-deletes

@@ -1,0 +1,44 @@
+version: v1
+mode: enforce
+
+defaults:
+  action: deny
+  additional_args: deny
+
+audit:
+  path: /var/log/mcpguard/filesystem.jsonl
+  on_error: deny
+
+servers:
+  - name: filesystem
+    transport: stdio
+    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+
+rules:
+  # Reads are permitted only inside the public tree. canonicalize: path is what
+  # makes this hold — without it, /srv/data/public/../../etc/shadow passes.
+  - name: allow-public-reads
+    servers: [filesystem]
+    tools: [read_file, read_multiple_files, list_directory, directory_tree]
+    match:
+      args:
+        path:
+          type: string
+          canonicalize: path
+          prefix: /srv/data/public/
+    action: allow
+
+  # Writes are gated on a human rather than denied outright.
+  - name: approve-writes
+    servers: [filesystem]
+    tools: [write_file, edit_file, create_directory, move_file]
+    action: approve
+    message: "Filesystem write requires approval."
+
+  # Explicit deny so the tool is hidden from tools/list rather than merely
+  # failing at call time.
+  - name: deny-deletes
+    servers: [filesystem]
+    tools: ["delete_*"]
+    action: deny
+    message: "Deletion is not permitted through mcpguard."
