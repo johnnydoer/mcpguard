@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/JohnnyDoer/mcpguard/internal/approval"
 	"github.com/JohnnyDoer/mcpguard/internal/audit"
 	"github.com/JohnnyDoer/mcpguard/internal/enforce"
@@ -34,6 +37,8 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	listen := fs.String("listen", "", "address to bind for http transport, e.g. 127.0.0.1:8900")
 	approvalListen := fs.String("approval-listen", "127.0.0.1:8901",
 		"loopback address for the approval callback server")
+	metricsListen := fs.String("metrics-listen", "",
+		"address to serve Prometheus /metrics (empty = disabled)")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: mcpguard run --policy <file> --server <name> "+
 			"[--audit-mode] [--policy-only]\n\n"+
@@ -104,10 +109,34 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		approver = broker
 	}
 
+	recorder := enforce.Recorder(logger)
+	if *metricsListen != "" {
+		reg := prometheus.NewRegistry()
+		metrics, metricsErr := audit.NewMetrics(reg)
+		if metricsErr != nil {
+			_, _ = fmt.Fprintf(stderr, "mcpguard: %v\n", metricsErr)
+			return 2
+		}
+		recorder = audit.MultiRecorder(logger, metrics)
+
+		metricsSrv := &http.Server{
+			Addr:              *metricsListen,
+			Handler:           promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if listenErr := metricsSrv.ListenAndServe(); listenErr != nil &&
+				!errors.Is(listenErr, http.ErrServerClosed) {
+				_, _ = fmt.Fprintf(stderr, "mcpguard: metrics listener: %v\n", listenErr)
+			}
+		}()
+		defer func() { _ = metricsSrv.Close() }()
+	}
+
 	interceptor, err := enforce.New(enforce.Options{
 		Server:   server.Name,
 		Engine:   engine,
-		Recorder: logger,
+		Recorder: recorder,
 		Approver: approver,
 	})
 	if err != nil {
