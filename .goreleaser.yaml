@@ -1,0 +1,57 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go test -short ./...
+
+builds:
+  - main: ./cmd/mcpguard
+    binary: mcpguard
+    env: [CGO_ENABLED=0]
+    # Windows is deliberately absent: stdio process supervision differs
+    # materially and is not supported. Shipping a build that half-works would be
+    # worse than shipping none.
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    files: [LICENSE, README.md, docs/*, examples/**/*]
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+# cosign v3 consolidated the separate signature and certificate outputs into a
+# single bundle file. `--output-signature` and `--output-certificate` were
+# REMOVED in v3 — using them fails with an unknown-flag error, not a warning.
+# Verified against cosign v3.1.2.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+release:
+  prerelease: auto
+  footer: |
+    ## Verifying this release
+
+    ```bash
+    cosign verify-blob checksums.txt \
+      --bundle checksums.txt.bundle \
+      --certificate-identity-regexp 'https://github\.com/JohnnyDoer/mcpguard/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    sha256sum -c checksums.txt --ignore-missing
+    ```
