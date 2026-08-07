@@ -12,6 +12,7 @@ import (
 	"github.com/JohnnyDoer/mcpguard/internal/audit"
 	"github.com/JohnnyDoer/mcpguard/internal/enforce"
 	"github.com/JohnnyDoer/mcpguard/internal/policy"
+	"github.com/JohnnyDoer/mcpguard/internal/transport/httpsse"
 	"github.com/JohnnyDoer/mcpguard/internal/transport/stdio"
 )
 
@@ -26,6 +27,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		"force audit mode: record decisions but enforce nothing, overriding the config")
 	policyOnly := fs.Bool("policy-only", false,
 		"validate the policy and exit without starting the proxy")
+	listen := fs.String("listen", "", "address to bind for http transport, e.g. 127.0.0.1:8900")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: mcpguard run --policy <file> --server <name> "+
 			"[--audit-mode] [--policy-only]\n\n"+
@@ -52,12 +54,6 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 			*serverName, *policyPath, cfg.ServerNames())
 		return 2
 	}
-	if server.Transport != "stdio" {
-		_, _ = fmt.Fprintf(stderr, "mcpguard: server %q uses transport %q; run supports stdio "+
-			"in this build\n", server.Name, server.Transport)
-		return 2
-	}
-
 	if *auditMode {
 		cfg.Mode = policy.ModeAudit
 	}
@@ -106,13 +102,30 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stderr, "mcpguard: proxying %s in %s mode (session %s)\n",
 		server.Name, cfg.Mode, sessionID)
 
-	err = stdio.Run(ctx, stdio.Config{
-		Command:     server.Command,
-		Interceptor: interceptor,
-		AgentIn:     os.Stdin,
-		AgentOut:    os.Stdout,
-		Stderr:      stderr,
-	})
+	switch server.Transport {
+	case "stdio":
+		err = stdio.Run(ctx, stdio.Config{
+			Command:     server.Command,
+			Interceptor: interceptor,
+			AgentIn:     os.Stdin,
+			AgentOut:    os.Stdout,
+			Stderr:      stderr,
+		})
+	case "http":
+		if *listen == "" {
+			_, _ = fmt.Fprintf(stderr, "mcpguard: server %q uses http, so --listen is required\n",
+				server.Name)
+			return 2
+		}
+		err = httpsse.Run(ctx, httpsse.Config{
+			Upstream:    server.URL,
+			Listen:      *listen,
+			Interceptor: interceptor,
+		})
+	default:
+		_, _ = fmt.Fprintf(stderr, "mcpguard: unsupported transport %q\n", server.Transport)
+		return 2
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcpguard: %v\n", err)
 		return 1
