@@ -1,0 +1,35 @@
+apiVersion: mcpguard.dev/v1
+kind: PolicyTest
+policy: mcpguard.yaml
+cases:
+  - name: get pods is allowed
+    server: kubernetes
+    tool: get_pods
+    args: {namespace: default}
+    expect: allow
+
+  - name: list deployments is allowed
+    server: kubernetes
+    tool: list_deployments
+    args: {namespace: production}
+    expect: allow
+
+  - name: delete deployment is denied
+    server: kubernetes
+    tool: delete_deployment
+    args: {name: web, namespace: production}
+    expect_rule: deny-delete
+    expect: deny
+
+  - name: apply manifest requires approval
+    server: kubernetes
+    tool: apply_manifest
+    args: {manifest: "apiVersion: v1\nkind: Pod"}
+    expect_rule: apply-manifest
+    expect: approve
+
+  - name: exec pod is denied
+    server: kubernetes
+    tool: exec_pod
+    args: {name: web-abc123, namespace: production, command: ["sh"]}
+    expect: deny

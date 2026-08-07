@@ -1,0 +1,35 @@
+apiVersion: mcpguard.dev/v1
+kind: PolicyTest
+policy: mcpguard.yaml
+cases:
+  - name: list issues is allowed
+    server: gitlab
+    tool: list_issues
+    args: {}
+    expect: allow
+
+  - name: get issue is allowed
+    server: gitlab
+    tool: get_issue
+    args: {iid: 42}
+    expect: allow
+
+  - name: delete project is denied
+    server: gitlab
+    tool: delete_project
+    args: {id: "mygroup/myrepo"}
+    expect: deny
+
+  - name: create issue is allowed
+    server: gitlab
+    tool: create_issue
+    args: {title: "bug report", description: "something broke"}
+    expect_rule: create-issue
+    expect: allow
+
+  - name: merge MR requires approval
+    server: gitlab
+    tool: merge_merge_request
+    args: {iid: 7}
+    expect_rule: merge-mr
+    expect: approve

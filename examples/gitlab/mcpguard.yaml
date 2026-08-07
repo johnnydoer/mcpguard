@@ -1,0 +1,32 @@
+version: v1
+
+servers:
+  - name: gitlab
+    transport: stdio
+    command: [npx, -y, "@modelcontextprotocol/server-gitlab"]
+
+defaults:
+  action: deny
+
+approval:
+  channel: ntfy
+  url: http://172.16.0.10:80
+  topic: mcpguard
+  timeout: 5m
+  on_timeout: deny
+
+rules:
+  - name: read-issues
+    servers: [gitlab]
+    tools: [list_issues, get_issue, list_merge_requests, get_merge_request]
+    action: allow
+
+  - name: create-issue
+    servers: [gitlab]
+    tools: [create_issue]
+    action: allow
+
+  - name: merge-mr
+    servers: [gitlab]
+    tools: [merge_merge_request]
+    action: approve

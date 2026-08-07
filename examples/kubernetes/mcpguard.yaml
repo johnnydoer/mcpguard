@@ -1,0 +1,32 @@
+version: v1
+
+servers:
+  - name: kubernetes
+    transport: stdio
+    command: [npx, -y, "@modelcontextprotocol/server-kubernetes"]
+
+defaults:
+  action: deny
+
+approval:
+  channel: ntfy
+  url: http://172.16.0.10:80
+  topic: mcpguard
+  timeout: 5m
+  on_timeout: deny
+
+rules:
+  - name: read-resources
+    servers: [kubernetes]
+    tools: ["get_*", "list_*", "describe_*"]
+    action: allow
+
+  - name: apply-manifest
+    servers: [kubernetes]
+    tools: [apply_manifest]
+    action: approve
+
+  - name: deny-delete
+    servers: [kubernetes]
+    tools: ["delete_*"]
+    action: deny
