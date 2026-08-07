@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/JohnnyDoer/mcpguard/internal/fuzz"
 	"github.com/JohnnyDoer/mcpguard/internal/policy"
 )
 
@@ -19,6 +20,8 @@ func testCmd(args []string, stdout, stderr io.Writer) int {
 	flagSet := flag.NewFlagSet("test", flag.ContinueOnError)
 	flagSet.SetOutput(stderr)
 	verbose := flagSet.Bool("v", false, "print every case, not just failures")
+	fuzzMode := flagSet.Bool("fuzz", false,
+		"mutate every allowed case and fail if any mutation is still allowed")
 	flagSet.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: mcpguard test [-v] <path>...\n\n"+
 			"Each path is a policy test file or a directory searched recursively for\n"+
@@ -47,7 +50,7 @@ func testCmd(args []string, stdout, stderr io.Writer) int {
 
 	totalPassed, totalFailed := 0, 0
 	for _, file := range files {
-		passed, failed, err := runOneTestFile(file, *verbose, stdout)
+		passed, failed, err := runOneTestFile(file, *verbose, *fuzzMode, stdout)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "mcpguard: %s: %v\n", file, err)
 			return 2
@@ -63,7 +66,7 @@ func testCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runOneTestFile(file string, verbose bool, stdout io.Writer) (int, int, error) {
+func runOneTestFile(file string, verbose bool, fuzzMode bool, stdout io.Writer) (int, int, error) {
 	pt, err := policy.LoadTestFile(file)
 	if err != nil {
 		return 0, 0, err
@@ -96,6 +99,15 @@ func runOneTestFile(file string, verbose bool, stdout io.Writer) (int, int, erro
 		case verbose:
 			_, _ = fmt.Fprintf(stdout, "  ok    %s\n", r.Case.Name)
 		}
+	}
+	if fuzzMode {
+		bypasses := fuzz.FindBypasses(engine, pt)
+		for _, b := range bypasses {
+			_, _ = fmt.Fprintf(stdout, "  BYPASS  %s\n            strategy=%s arg=%s rule=%s\n"+
+				"            args=%v\n",
+				b.Case, b.Mutation.Strategy, b.Mutation.Arg, b.GotRule, b.Mutation.Args)
+		}
+		report.Failed += len(bypasses)
 	}
 	return report.Passed, report.Failed, nil
 }

@@ -35,14 +35,13 @@ jobs:
         with:
           version: latest
 
-# enabled in Task 17
-#  fuzz:
-#    # Bounded fuzz run on every PR. Not a substitute for long local runs, but it
-#    # catches a regression that reintroduces a known bypass within the minute.
-#    runs-on: ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v4
-#      - uses: actions/setup-go@v5
-#        with:
-#          go-version: "1.23"
-#      - run: make fuzz
+  fuzz:
+    # Bounded fuzz run on every PR. Not a substitute for long local runs, but it
+    # catches a regression that reintroduces a known bypass within the minute.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: make fuzz
