@@ -120,17 +120,17 @@ See [docs/prior-art.md](docs/prior-art.md) for a survey of related projects and 
 ## Status
 
 **Implemented:**
-
 - stdio and HTTP/SSE transports
 - Policy engine: exact, prefix, regex, CIDR, glob, path canonicalization matchers
 - Approval via ntfy with single-use call-bound nonces
 - Audit log with redaction and unredacted hashing
 - `tools/list` and `resources/list` filtering
-- `mcpguard test`, `mcpguard test -fuzz`, `mcpguard validate`, `mcpguard explain`
+- `mcpguard test`, `mcpguard test --fuzz`, `mcpguard validate`, `mcpguard explain`
 - Prometheus metrics and Grafana dashboard
 
-**Not implemented:**
+**Test coverage:** 218 tests, 77.1% overall, 89.1% internal/policy, 89.7% internal/canon
 
+**Not implemented:**
 - Windows (stdio process supervision differs materially; not supported)
 - WebSocket transport
 - Remote policy sources (HTTP, git)
