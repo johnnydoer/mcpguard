@@ -23,6 +23,13 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: Validate example policies offline
+        run: |
+          go build -o mcpguard ./cmd/mcpguard
+          for policy in examples/*/mcpguard.yaml; do
+            ./mcpguard validate --policy "$policy" --offline
+          done
+          ./mcpguard test --fuzz examples/
 
   lint:
     runs-on: ubuntu-latest
