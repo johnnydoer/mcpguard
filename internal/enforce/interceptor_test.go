@@ -213,3 +213,141 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 		t.Error("Recorder is required — a proxy that cannot audit must not start")
 	}
 }
+
+func TestOutboundFiltersToolsList(t *testing.T) {
+	i := newTestInterceptor(t, &fakeRecorder{})
+
+	// Inbound must run first so the interceptor knows this id was a tools/list.
+	req := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`10`),
+		Method: protocol.MethodToolsList}
+	if forward, _ := i.Inbound(req); !forward {
+		t.Fatal("tools/list must be forwarded")
+	}
+
+	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`10`),
+		Result: json.RawMessage(`{"tools":[{"name":"read_file"},{"name":"delete_file"},{"name":"other"}]}`)}
+
+	out := i.Outbound(resp)
+	var result protocol.ToolsListResult
+	if err := json.Unmarshal(out.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "read_file" {
+		t.Errorf("tools = %+v; delete_file has a deny rule and 'other' falls to "+
+			"default deny, so only read_file should remain", result.Tools)
+	}
+}
+
+func TestOutboundDoesNotFilterUncorrelatedResponse(t *testing.T) {
+	// A response whose id was never seen must pass through untouched rather than
+	// being speculatively parsed as a tools/list result.
+	i := newTestInterceptor(t, &fakeRecorder{})
+	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`99`),
+		Result: json.RawMessage(`{"tools":[{"name":"delete_file"}]}`)}
+
+	if out := i.Outbound(resp); string(out.Result) != string(resp.Result) {
+		t.Error("an uncorrelated response must not be filtered")
+	}
+}
+
+func TestOutboundFiltersOnlyOncePerID(t *testing.T) {
+	// The correlation entry must be consumed, or the table grows without bound
+	// across a long session.
+	i := newTestInterceptor(t, &fakeRecorder{})
+	req := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`11`),
+		Method: protocol.MethodToolsList}
+	i.Inbound(req)
+
+	resp := func() *protocol.Message {
+		return &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`11`),
+			Result: json.RawMessage(`{"tools":[{"name":"delete_file"}]}`)}
+	}
+	first := i.Outbound(resp())
+	second := i.Outbound(resp())
+
+	if strings.Contains(string(first.Result), "delete_file") {
+		t.Error("the first response should have been filtered")
+	}
+	if !strings.Contains(string(second.Result), "delete_file") {
+		t.Error("the second response has no pending entry and must pass through")
+	}
+}
+
+func TestOutboundPassesThroughErrorResponseUnfiltered(t *testing.T) {
+	// An error response has no result to filter, and attempting to parse one
+	// would turn a server error into a proxy error.
+	i := newTestInterceptor(t, &fakeRecorder{})
+	i.Inbound(&protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`12`),
+		Method: protocol.MethodToolsList})
+
+	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`12`),
+		Error: &protocol.Error{Code: -32603, Message: "server exploded"}}
+
+	out := i.Outbound(resp)
+	if out.Error == nil || out.Error.Message != "server exploded" {
+		t.Errorf("error response was altered: %+v", out)
+	}
+}
+
+func TestOutboundFilterFailureDropsTheResponse(t *testing.T) {
+	// If a tools/list result cannot be filtered, forwarding it unfiltered would
+	// advertise denied tools. Replacing it with an error is the fail-closed
+	// choice.
+	i := newTestInterceptor(t, &fakeRecorder{})
+	i.Inbound(&protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`13`),
+		Method: protocol.MethodToolsList})
+
+	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`13`),
+		Result: json.RawMessage(`{"tools": "not an array"}`)}
+
+	out := i.Outbound(resp)
+	if out == nil {
+		t.Fatal("expected an error response, not a dropped message")
+	}
+	if out.Error == nil {
+		t.Errorf("an unfilterable tools/list must become an error, got %+v", out)
+	}
+}
+
+func TestInboundPolicesResourcesRead(t *testing.T) {
+	i, err := New(Options{Server: "fs", Recorder: &fakeRecorder{}, Engine: testEngine(t, `
+version: v1
+servers: [{name: fs, transport: stdio, command: ["true"]}]
+rules:
+  - name: allow-public-resources
+    servers: [fs]
+    tools: ["file:///srv/public/*"]
+    action: allow
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`20`),
+		Method: protocol.MethodResourcesRead,
+		Params: json.RawMessage(`{"uri":"file:///srv/public/a.txt"}`)}
+	if forward, reply := i.Inbound(allowed); !forward || reply != nil {
+		t.Errorf("permitted resource read: got (%v, %v), want (true, nil)", forward, reply)
+	}
+
+	denied := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`21`),
+		Method: protocol.MethodResourcesRead,
+		Params: json.RawMessage(`{"uri":"file:///etc/shadow"}`)}
+	forward, reply := i.Inbound(denied)
+	if forward {
+		t.Error("a resource read outside the allowed prefix must not be forwarded")
+	}
+	if reply == nil || reply.Error == nil {
+		t.Fatal("expected a denial reply")
+	}
+}
+
+func TestInboundDeniesMalformedResourcesRead(t *testing.T) {
+	i := newTestInterceptor(t, &fakeRecorder{})
+	m := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`22`),
+		Method: protocol.MethodResourcesRead, Params: json.RawMessage(`{}`)}
+
+	if forward, _ := i.Inbound(m); forward {
+		t.Error("a resources/read with no uri cannot be authorized and must be denied")
+	}
+}

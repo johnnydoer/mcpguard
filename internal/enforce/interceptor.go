@@ -89,16 +89,12 @@ func (i *Interceptor) Inbound(m *protocol.Message) (bool, *protocol.Message) {
 	switch m.Method {
 	case protocol.MethodToolsCall:
 		return i.handleToolsCall(m)
+	case protocol.MethodResourcesRead:
+		return i.handleResourcesRead(m)
 	case protocol.MethodToolsList, protocol.MethodResourcesList:
-		// Remember the method so Outbound knows to filter the result. Task 14
-		// implements the filtering; recording the pending method here keeps the
-		// correlation logic in one place.
 		i.rememberPending(m)
 		return true, nil
 	default:
-		// initialize, ping, prompts, and notifications carry no decision surface
-		// and are forwarded untouched. Passing initialize through is what keeps
-		// mcpguard protocol-version agnostic.
 		return true, nil
 	}
 }
@@ -157,6 +153,42 @@ func (i *Interceptor) handleToolsCall(m *protocol.Message) (bool, *protocol.Mess
 		ev = i.resolveApproval(ev)
 	}
 
+	return i.finish(m, ev)
+}
+
+// handleResourcesRead authorizes a resource read.
+//
+// resources/read is a read primitive with real exfiltration reach. A tool
+// allowlist that ignores it does not do what its users think it does, which is
+// why it goes through the same engine as tools/call — the URI takes the place of
+// the tool name, so one rule syntax covers both.
+func (i *Interceptor) handleResourcesRead(m *protocol.Message) (bool, *protocol.Message) {
+	start := time.Now()
+
+	params, err := protocol.ParseResourcesRead(m)
+	if err != nil {
+		ev := Event{
+			Server: i.server, Method: m.Method, Mode: i.engine.Config().Mode,
+			Decision: policy.Decision{
+				Action: policy.ActionDeny,
+				Reason: fmt.Sprintf("cannot parse resources/read, denying: %v", err),
+			},
+			Latency: time.Since(start),
+		}
+		return i.finish(m, ev)
+	}
+
+	decision := i.engine.Evaluate(policy.Request{
+		Server: i.server, Method: m.Method, Tool: params.URI, Args: map[string]any{},
+	})
+
+	ev := Event{
+		Server: i.server, Method: m.Method, Tool: params.URI, Mode: i.engine.Config().Mode,
+		Decision: decision, Latency: time.Since(start),
+	}
+	if decision.Action == policy.ActionApprove {
+		ev = i.resolveApproval(ev)
+	}
 	return i.finish(m, ev)
 }
 
@@ -226,10 +258,45 @@ func (i *Interceptor) finish(m *protocol.Message, ev Event) (bool, *protocol.Mes
 	return false, protocol.DenyResponse(m.ID, ev.Decision.Rule, ev.Decision.Reason)
 }
 
-// Outbound handles a server-to-agent message. Task 14 adds list filtering here.
+// Outbound filters list results so the agent never learns about denied
+// capabilities.
 func (i *Interceptor) Outbound(m *protocol.Message) *protocol.Message {
-	if _, ok := i.takePending(m); !ok {
+	method, ok := i.takePending(m)
+	if !ok {
 		return m
 	}
+	// An error response has no result to filter, and parsing one would turn a
+	// server error into a proxy error.
+	if m.Error != nil || len(m.Result) == 0 {
+		return m
+	}
+
+	var (
+		filtered []byte
+		err      error
+	)
+	switch method {
+	case protocol.MethodToolsList:
+		filtered, err = protocol.FilterToolsList(m.Result, func(name string) bool {
+			return i.engine.ToolVisible(i.server, name)
+		})
+	case protocol.MethodResourcesList:
+		filtered, err = protocol.FilterResourcesList(m.Result, func(uri string) bool {
+			return i.engine.ToolVisible(i.server, uri)
+		})
+	default:
+		return m
+	}
+
+	if err != nil {
+		// Forwarding an unfilterable list would advertise denied capabilities.
+		// Replacing it with an error is the fail-closed choice.
+		return protocol.ErrorResponse(m.ID, protocol.CodeInternalError,
+			"mcpguard could not filter the response", struct {
+				Reason string `json:"reason"`
+			}{Reason: err.Error()})
+	}
+
+	m.Result = filtered
 	return m
 }
