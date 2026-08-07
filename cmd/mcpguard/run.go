@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/JohnnyDoer/mcpguard/internal/approval"
 	"github.com/JohnnyDoer/mcpguard/internal/audit"
 	"github.com/JohnnyDoer/mcpguard/internal/enforce"
 	"github.com/JohnnyDoer/mcpguard/internal/policy"
@@ -28,6 +32,8 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	policyOnly := fs.Bool("policy-only", false,
 		"validate the policy and exit without starting the proxy")
 	listen := fs.String("listen", "", "address to bind for http transport, e.g. 127.0.0.1:8900")
+	approvalListen := fs.String("approval-listen", "127.0.0.1:8901",
+		"loopback address for the approval callback server")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: mcpguard run --policy <file> --server <name> "+
 			"[--audit-mode] [--policy-only]\n\n"+
@@ -74,10 +80,35 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = logger.Close() }()
 
+	var approver enforce.Approver
+	if cfg.Approval.Channel != "" {
+		broker, brokerErr := approval.NewBroker(cfg.Approval,
+			"http://"+*approvalListen)
+		if brokerErr != nil {
+			_, _ = fmt.Fprintf(stderr, "mcpguard: %v\n", brokerErr)
+			return 2
+		}
+		// Loopback by default: the nonce is the only credential.
+		approvalSrv := &http.Server{
+			Addr:              *approvalListen,
+			Handler:           broker.Registry().Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if listenErr := approvalSrv.ListenAndServe(); listenErr != nil &&
+				!errors.Is(listenErr, http.ErrServerClosed) {
+				_, _ = fmt.Fprintf(stderr, "mcpguard: approval listener: %v\n", listenErr)
+			}
+		}()
+		defer func() { _ = approvalSrv.Close() }()
+		approver = broker
+	}
+
 	interceptor, err := enforce.New(enforce.Options{
 		Server:   server.Name,
 		Engine:   engine,
 		Recorder: logger,
+		Approver: approver,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcpguard: %v\n", err)
