@@ -229,7 +229,7 @@ func TestPassthroughInterceptorForwardsEverything(t *testing.T) {
 	i := PassthroughInterceptor{}
 	m := &protocol.Message{Method: protocol.MethodToolsCall}
 
-	forward, reply := i.Inbound(m)
+	forward, reply := i.Inbound(context.Background(), m)
 	if !forward || reply != nil {
 		t.Errorf("Inbound = (%v, %v), want (true, nil)", forward, reply)
 	}

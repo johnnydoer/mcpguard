@@ -14,10 +14,11 @@ import (
 	"github.com/JohnnyDoer/mcpguard/internal/policy"
 )
 
-// Mutation is one adversarial variant of a call's arguments.
+// Mutation is one adversarial variant of a call's arguments or tool name.
 type Mutation struct {
 	Strategy string
 	Arg      string
+	Tool     string // non-empty only for tool-mutation strategy
 	Args     map[string]any
 }
 
@@ -183,8 +184,55 @@ func FindBypasses(e *policy.Engine, pt *policy.PolicyTest) []Bypass {
 				found = append(found, Bypass{Case: c.Name, Mutation: m, GotRule: d.Rule})
 			}
 		}
+
+		// Mutate the Tool field. For resources/read the tool is a URI, making it
+		// the primary traversal target. The canonical re-evaluation gate mirrors
+		// the one in Interceptor.handleResourcesRead: a raw bypass that disappears
+		// after canonicalization is a real finding.
+		for _, variant := range MutateString(c.Tool) {
+			d := e.Evaluate(policy.Request{
+				Server: c.Server, Method: method, Tool: variant, Args: c.Args,
+			})
+			if d.Action != policy.ActionAllow {
+				continue
+			}
+			dc := e.Evaluate(policy.Request{
+				Server: c.Server, Method: method, Tool: canonicalTool(variant), Args: c.Args,
+			})
+			if dc.Action != policy.ActionAllow {
+				found = append(found, Bypass{
+					Case: c.Name,
+					Mutation: Mutation{
+						Strategy: "tool-mutation", Arg: "tool",
+						Tool: variant, Args: c.Args,
+					},
+					GotRule: d.Rule,
+				})
+			}
+		}
 	}
 	return found
+}
+
+// canonicalTool returns the canonical form of a Tool field value for
+// re-evaluation after a tool-mutation bypass candidate is found.
+//
+// For file:// URIs the path is cleaned and traversal elements cause the
+// function to return the empty string, which matches nothing. For other
+// strings canon.Path is applied as a best-effort normalization.
+func canonicalTool(tool string) string {
+	if strings.HasPrefix(tool, "file://") {
+		p, err := canon.FileURIPath(tool)
+		if err != nil {
+			return ""
+		}
+		return "file://" + p
+	}
+	canonical, err := canon.Path(tool)
+	if err != nil {
+		return ""
+	}
+	return canonical
 }
 
 // canonicalStringArgs returns a copy of args with every string value replaced

@@ -16,7 +16,7 @@ import (
 // denyDeletes forwards everything except tools/call for delete_file.
 type denyDeletes struct{}
 
-func (denyDeletes) Inbound(m *protocol.Message) (bool, *protocol.Message) {
+func (denyDeletes) Inbound(_ context.Context, m *protocol.Message) (bool, *protocol.Message) {
 	if m.Method != protocol.MethodToolsCall {
 		return true, nil
 	}

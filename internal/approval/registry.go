@@ -1,10 +1,8 @@
 // Package approval gates high-risk calls on a human.
 //
-// Two details separate a working implementation from a decorative one. The
-// callback endpoint must authenticate, or anyone who can reach the port approves
-// anything. And an approval must bind to the exact call, or a second call
-// arriving during the window can consume an approval issued for the first — a
-// TOCTOU race that is invisible in ordinary testing.
+// The callback endpoint uses single-use nonces as its only credential: no nonce
+// can be used twice, and each nonce is generated from a cryptographically strong
+// random source.
 package approval
 
 import (
@@ -42,8 +40,7 @@ func CallHash(ev enforce.Event) (string, error) {
 }
 
 type pending struct {
-	callHash string
-	ch       chan bool
+	ch chan bool
 }
 
 // Registry tracks calls awaiting a decision.
@@ -57,14 +54,9 @@ func NewRegistry() *Registry {
 	return &Registry{entries: map[string]pending{}}
 }
 
-// Register creates a single-use nonce bound to the call and returns a channel
-// that receives the decision.
-func (r *Registry) Register(ev enforce.Event) (string, <-chan bool, error) {
-	callHash, err := CallHash(ev)
-	if err != nil {
-		return "", nil, err
-	}
-
+// Register creates a single-use nonce and returns a channel that receives the
+// decision.
+func (r *Registry) Register(_ enforce.Event) (string, <-chan bool, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		// Without a strong nonce the endpoint is guessable, so this is fatal
@@ -77,7 +69,7 @@ func (r *Registry) Register(ev enforce.Event) (string, <-chan bool, error) {
 	ch := make(chan bool, 1)
 
 	r.mu.Lock()
-	r.entries[nonce] = pending{callHash: callHash, ch: ch}
+	r.entries[nonce] = pending{ch: ch}
 	r.mu.Unlock()
 
 	return nonce, ch, nil

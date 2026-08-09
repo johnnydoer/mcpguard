@@ -9,9 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/JohnnyDoer/mcpguard/internal/canon"
 	"github.com/JohnnyDoer/mcpguard/internal/policy"
 	"github.com/JohnnyDoer/mcpguard/internal/protocol"
 )
@@ -47,6 +49,10 @@ type Options struct {
 	// denial. Failing closed is the only safe behaviour for a gate with nobody
 	// behind it.
 	Approver Approver
+	// Cancel, when non-nil, is called when audit.on_error:halt triggers. Calling
+	// it cancels the proxy's lifecycle context, which causes both transports to
+	// exit cleanly after the in-flight denial is delivered.
+	Cancel context.CancelFunc
 }
 
 // Interceptor applies policy to messages crossing the proxy.
@@ -55,6 +61,7 @@ type Interceptor struct {
 	engine   *policy.Engine
 	recorder Recorder
 	approver Approver
+	cancel   context.CancelFunc
 
 	// pending correlates a response to the request that produced it, so a
 	// tools/list result can be filtered. Keyed by JSON-RPC id.
@@ -80,17 +87,18 @@ func New(opts Options) (*Interceptor, error) {
 		engine:   opts.Engine,
 		recorder: opts.Recorder,
 		approver: opts.Approver,
+		cancel:   opts.Cancel,
 		pending:  map[string]string{},
 	}, nil
 }
 
 // Inbound applies policy to an agent-to-server message.
-func (i *Interceptor) Inbound(m *protocol.Message) (bool, *protocol.Message) {
+func (i *Interceptor) Inbound(ctx context.Context, m *protocol.Message) (bool, *protocol.Message) {
 	switch m.Method {
 	case protocol.MethodToolsCall:
-		return i.handleToolsCall(m)
+		return i.handleToolsCall(ctx, m)
 	case protocol.MethodResourcesRead:
-		return i.handleResourcesRead(m)
+		return i.handleResourcesRead(ctx, m)
 	case protocol.MethodToolsList, protocol.MethodResourcesList:
 		i.rememberPending(m)
 		return true, nil
@@ -122,7 +130,7 @@ func (i *Interceptor) takePending(m *protocol.Message) (string, bool) {
 	return method, ok
 }
 
-func (i *Interceptor) handleToolsCall(m *protocol.Message) (bool, *protocol.Message) {
+func (i *Interceptor) handleToolsCall(ctx context.Context, m *protocol.Message) (bool, *protocol.Message) {
 	start := time.Now()
 
 	params, err := protocol.ParseToolsCall(m)
@@ -150,7 +158,7 @@ func (i *Interceptor) handleToolsCall(m *protocol.Message) (bool, *protocol.Mess
 	}
 
 	if decision.Action == policy.ActionApprove {
-		ev = i.resolveApproval(ev)
+		ev = i.resolveApproval(ctx, ev)
 	}
 
 	return i.finish(m, ev)
@@ -162,7 +170,12 @@ func (i *Interceptor) handleToolsCall(m *protocol.Message) (bool, *protocol.Mess
 // allowlist that ignores it does not do what its users think it does, which is
 // why it goes through the same engine as tools/call — the URI takes the place of
 // the tool name, so one rule syntax covers both.
-func (i *Interceptor) handleResourcesRead(m *protocol.Message) (bool, *protocol.Message) {
+//
+// For file:// URIs the URI is canonicalized before evaluation. A raw URI such as
+// file:///srv/public/../etc/shadow would match a glob like file:///srv/public/*
+// because GlobMatch does not understand "..". Canonicalization rejects any URI
+// containing a traversal element, closing that bypass class.
+func (i *Interceptor) handleResourcesRead(ctx context.Context, m *protocol.Message) (bool, *protocol.Message) {
 	start := time.Now()
 
 	params, err := protocol.ParseResourcesRead(m)
@@ -178,16 +191,34 @@ func (i *Interceptor) handleResourcesRead(m *protocol.Message) (bool, *protocol.
 		return i.finish(m, ev)
 	}
 
+	toolURI := params.URI
+	if strings.HasPrefix(params.URI, "file://") {
+		canonPath, canonErr := canon.FileURIPath(params.URI)
+		if canonErr != nil {
+			ev := Event{
+				Server: i.server, Method: m.Method, Tool: params.URI,
+				Mode: i.engine.Config().Mode,
+				Decision: policy.Decision{
+					Action: policy.ActionDeny,
+					Reason: fmt.Sprintf("resource URI rejected: %v", canonErr),
+				},
+				Latency: time.Since(start),
+			}
+			return i.finish(m, ev)
+		}
+		toolURI = "file://" + canonPath
+	}
+
 	decision := i.engine.Evaluate(policy.Request{
-		Server: i.server, Method: m.Method, Tool: params.URI, Args: map[string]any{},
+		Server: i.server, Method: m.Method, Tool: toolURI, Args: map[string]any{},
 	})
 
 	ev := Event{
-		Server: i.server, Method: m.Method, Tool: params.URI, Mode: i.engine.Config().Mode,
+		Server: i.server, Method: m.Method, Tool: toolURI, Mode: i.engine.Config().Mode,
 		Decision: decision, Latency: time.Since(start),
 	}
 	if decision.Action == policy.ActionApprove {
-		ev = i.resolveApproval(ev)
+		ev = i.resolveApproval(ctx, ev)
 	}
 	return i.finish(m, ev)
 }
@@ -196,7 +227,11 @@ func (i *Interceptor) handleResourcesRead(m *protocol.Message) (bool, *protocol.
 //
 // With no approver configured the decision degrades to a denial: a gate with
 // nobody behind it must not open.
-func (i *Interceptor) resolveApproval(ev Event) Event {
+//
+// The caller's context is respected: if the transport shuts down (SIGTERM,
+// HTTP client disconnect) the approval wait is interrupted rather than blocking
+// for the full Approval.Timeout.
+func (i *Interceptor) resolveApproval(ctx context.Context, ev Event) Event {
 	if i.approver == nil {
 		ev.Decision.Action = policy.ActionDeny
 		ev.Decision.Reason = "approval required but no approver is configured; denying"
@@ -204,10 +239,10 @@ func (i *Interceptor) resolveApproval(ev Event) Event {
 	}
 
 	cfg := i.engine.Config()
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Approval.Timeout)
+	approvalCtx, cancel := context.WithTimeout(ctx, cfg.Approval.Timeout)
 	defer cancel()
 
-	approved, err := i.approver.Approve(ctx, ev)
+	approved, err := i.approver.Approve(approvalCtx, ev)
 	switch {
 	case err != nil:
 		// Cannot reach a human, therefore cannot have approval.
@@ -236,9 +271,12 @@ func (i *Interceptor) finish(m *protocol.Message, ev Event) (bool, *protocol.Mes
 			return false, protocol.DenyResponse(m.ID, ev.Decision.Rule,
 				fmt.Sprintf("audit log unavailable, denying: %v", err))
 		case policy.OnErrorHalt:
-			// The stdio pump has no way to stop the process from here, so halt
-			// is implemented as deny plus a fatal record that Task 16's run
-			// command watches for.
+			// Cancel the proxy's lifecycle context so the transport exits cleanly
+			// after delivering this denial. The in-flight call is denied first so
+			// the agent gets a response rather than a silent disconnect.
+			if i.cancel != nil {
+				i.cancel()
+			}
 			return false, protocol.DenyResponse(m.ID, ev.Decision.Rule,
 				fmt.Sprintf("audit log unavailable and on_error is halt: %v", err))
 		case policy.OnErrorContinue:

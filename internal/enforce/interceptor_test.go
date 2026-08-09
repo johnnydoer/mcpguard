@@ -1,6 +1,7 @@
 package enforce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -78,7 +79,7 @@ func call(id, tool, args string) *protocol.Message {
 
 func TestInboundAllowsPermittedCall(t *testing.T) {
 	rec := &fakeRecorder{}
-	forward, reply := newTestInterceptor(t, rec).Inbound(
+	forward, reply := newTestInterceptor(t, rec).Inbound(context.Background(),
 		call(`1`, "read_file", `{"path":"/srv/public/a"}`))
 
 	if !forward || reply != nil {
@@ -91,7 +92,7 @@ func TestInboundAllowsPermittedCall(t *testing.T) {
 
 func TestInboundDeniesAndDoesNotForward(t *testing.T) {
 	rec := &fakeRecorder{}
-	forward, reply := newTestInterceptor(t, rec).Inbound(
+	forward, reply := newTestInterceptor(t, rec).Inbound(context.Background(),
 		call(`2`, "delete_file", `{"path":"/srv/public/a"}`))
 
 	if forward {
@@ -118,7 +119,7 @@ func TestInboundDeniesMalformedToolsCall(t *testing.T) {
 	m := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`3`),
 		Method: protocol.MethodToolsCall, Params: json.RawMessage(`{"arguments":{}}`)}
 
-	forward, reply := newTestInterceptor(t, rec).Inbound(m)
+	forward, reply := newTestInterceptor(t, rec).Inbound(context.Background(), m)
 	if forward {
 		t.Error("an unparseable tools/call must not be forwarded")
 	}
@@ -145,7 +146,7 @@ func TestInboundAuditModeForwardsDeniedCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	forward, reply := i.Inbound(call(`4`, "delete_file", `{"path":"/srv/public/a"}`))
+	forward, reply := i.Inbound(context.Background(), call(`4`, "delete_file", `{"path":"/srv/public/a"}`))
 	if !forward {
 		t.Error("audit mode must forward the call")
 	}
@@ -164,7 +165,7 @@ func TestInboundRecorderFailureDeniesWhenConfigured(t *testing.T) {
 	// audit.on_error: deny. A call that cannot be recorded must not be
 	// permitted, because permitting it unrecorded is worse than refusing it.
 	rec := &fakeRecorder{err: errAuditWriteForTest}
-	forward, reply := newTestInterceptor(t, rec).Inbound(
+	forward, reply := newTestInterceptor(t, rec).Inbound(context.Background(),
 		call(`5`, "read_file", `{"path":"/srv/public/a"}`))
 
 	if forward {
@@ -181,7 +182,7 @@ func TestInboundForwardsNonInterceptedMethods(t *testing.T) {
 
 	for _, method := range []string{protocol.MethodInitialize, "ping", "notifications/initialized"} {
 		m := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`9`), Method: method}
-		forward, reply := i.Inbound(m)
+		forward, reply := i.Inbound(context.Background(), m)
 		if !forward || reply != nil {
 			t.Errorf("%s: got (%v, %v), want (true, nil)", method, forward, reply)
 		}
@@ -220,7 +221,7 @@ func TestOutboundFiltersToolsList(t *testing.T) {
 	// Inbound must run first so the interceptor knows this id was a tools/list.
 	req := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`10`),
 		Method: protocol.MethodToolsList}
-	if forward, _ := i.Inbound(req); !forward {
+	if forward, _ := i.Inbound(context.Background(), req); !forward {
 		t.Fatal("tools/list must be forwarded")
 	}
 
@@ -256,7 +257,7 @@ func TestOutboundFiltersOnlyOncePerID(t *testing.T) {
 	i := newTestInterceptor(t, &fakeRecorder{})
 	req := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`11`),
 		Method: protocol.MethodToolsList}
-	i.Inbound(req)
+	i.Inbound(context.Background(), req)
 
 	resp := func() *protocol.Message {
 		return &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`11`),
@@ -277,7 +278,7 @@ func TestOutboundPassesThroughErrorResponseUnfiltered(t *testing.T) {
 	// An error response has no result to filter, and attempting to parse one
 	// would turn a server error into a proxy error.
 	i := newTestInterceptor(t, &fakeRecorder{})
-	i.Inbound(&protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`12`),
+	i.Inbound(context.Background(), &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`12`),
 		Method: protocol.MethodToolsList})
 
 	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`12`),
@@ -294,7 +295,7 @@ func TestOutboundFilterFailureDropsTheResponse(t *testing.T) {
 	// advertise denied tools. Replacing it with an error is the fail-closed
 	// choice.
 	i := newTestInterceptor(t, &fakeRecorder{})
-	i.Inbound(&protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`13`),
+	i.Inbound(context.Background(), &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`13`),
 		Method: protocol.MethodToolsList})
 
 	resp := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`13`),
@@ -326,14 +327,14 @@ rules:
 	allowed := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`20`),
 		Method: protocol.MethodResourcesRead,
 		Params: json.RawMessage(`{"uri":"file:///srv/public/a.txt"}`)}
-	if forward, reply := i.Inbound(allowed); !forward || reply != nil {
+	if forward, reply := i.Inbound(context.Background(), allowed); !forward || reply != nil {
 		t.Errorf("permitted resource read: got (%v, %v), want (true, nil)", forward, reply)
 	}
 
 	denied := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`21`),
 		Method: protocol.MethodResourcesRead,
 		Params: json.RawMessage(`{"uri":"file:///etc/shadow"}`)}
-	forward, reply := i.Inbound(denied)
+	forward, reply := i.Inbound(context.Background(), denied)
 	if forward {
 		t.Error("a resource read outside the allowed prefix must not be forwarded")
 	}
@@ -347,7 +348,7 @@ func TestInboundDeniesMalformedResourcesRead(t *testing.T) {
 	m := &protocol.Message{JSONRPC: protocol.Version, ID: json.RawMessage(`22`),
 		Method: protocol.MethodResourcesRead, Params: json.RawMessage(`{}`)}
 
-	if forward, _ := i.Inbound(m); forward {
+	if forward, _ := i.Inbound(context.Background(), m); forward {
 		t.Error("a resources/read with no uri cannot be authorized and must be denied")
 	}
 }

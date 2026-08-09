@@ -22,11 +22,13 @@ import (
 // The same interface serves both transports, so enforcement logic is written
 // once and cannot drift between stdio and HTTP/SSE.
 type Interceptor interface {
-	// Inbound handles an agent-to-server message. Returning forward=false with a
-	// non-nil reply short-circuits the call: the reply goes back to the agent and
-	// the server never sees the request. Returning forward=false with a nil reply
-	// drops the message, which is only correct for notifications.
-	Inbound(m *protocol.Message) (forward bool, reply *protocol.Message)
+	// Inbound handles an agent-to-server message. The context carries the
+	// transport's lifetime — cancellation must interrupt any blocking approval
+	// wait. Returning forward=false with a non-nil reply short-circuits the call:
+	// the reply goes back to the agent and the server never sees the request.
+	// Returning forward=false with a nil reply drops the message, which is only
+	// correct for notifications.
+	Inbound(ctx context.Context, m *protocol.Message) (forward bool, reply *protocol.Message)
 
 	// Outbound handles a server-to-agent message and returns what the agent
 	// should receive. Returning nil drops it.
@@ -38,7 +40,7 @@ type Interceptor interface {
 type PassthroughInterceptor struct{}
 
 // Inbound forwards every agent-to-server message unchanged.
-func (PassthroughInterceptor) Inbound(*protocol.Message) (bool, *protocol.Message) {
+func (PassthroughInterceptor) Inbound(_ context.Context, _ *protocol.Message) (bool, *protocol.Message) {
 	return true, nil
 }
 
@@ -136,7 +138,7 @@ func Run(ctx context.Context, cfg Config) error {
 				return // EOF or malformed input: stop pumping this direction
 			}
 
-			forward, reply := cfg.Interceptor.Inbound(m)
+			forward, reply := cfg.Interceptor.Inbound(ctx, m)
 			if reply != nil {
 				if err := agentEnc.Encode(reply); err != nil {
 					return

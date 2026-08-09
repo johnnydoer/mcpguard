@@ -7,6 +7,7 @@
 package httpsse
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -103,7 +104,7 @@ func (p *proxy) servePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forward, reply := p.interceptor.Inbound(&m)
+	forward, reply := p.interceptor.Inbound(r.Context(), &m)
 	if reply != nil {
 		// HTTP 200 with a JSON-RPC error: the transport succeeded and the call
 		// was refused. A 4xx would make well-behaved clients treat it as a
@@ -170,7 +171,7 @@ func (p *proxy) serveStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	dec := protocol.NewDecoder(&sseFrames{r: upstreamResp.Body})
+	dec := protocol.NewDecoder(newSSEFrames(upstreamResp.Body))
 	for {
 		m, err := dec.Decode()
 		if err != nil {
@@ -225,35 +226,47 @@ func writeMessage(w http.ResponseWriter, status int, m *protocol.Message) {
 
 // sseFrames adapts an SSE byte stream to the line-delimited JSON the protocol
 // decoder expects, by stripping "data: " prefixes and blank separator lines.
+//
+// The previous chunk-based approach had two bugs. First, returning (0, nil) for
+// keep-alive lines caused bufio.Scanner to reach maxConsecutiveEmptyReads=100
+// and return io.ErrNoProgress, silently breaking the stream. Second, reading raw
+// 32 KiB chunks meant a data: line larger than a chunk (or spanning two chunks)
+// was silently truncated, corrupting the JSON fed to protocol.NewDecoder.
+//
+// Using bufio.Scanner here fixes both: each Scan() call returns one complete
+// line regardless of how the transport delivers the bytes, and non-data lines
+// are skipped with a continue rather than surfaced as empty reads.
 type sseFrames struct {
-	r   io.Reader
-	buf []byte
-	pos int
+	scanner *bufio.Scanner
+	buf     []byte
+	pos     int
+}
+
+func newSSEFrames(r io.Reader) *sseFrames {
+	sc := bufio.NewScanner(r)
+	// MCP tool results can be large. Allow up to 4 MiB per line so a single
+	// large response does not break the stream.
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	return &sseFrames{scanner: sc}
 }
 
 func (s *sseFrames) Read(p []byte) (int, error) {
-	if s.pos >= len(s.buf) {
-		chunk := make([]byte, 32*1024)
-		n, err := s.r.Read(chunk)
-		if n == 0 {
-			return 0, err
-		}
-		// Rewrite "data: {...}\n\n" into "{...}\n" so the existing decoder can
-		// consume it unchanged.
-		text := string(chunk[:n])
-		var out strings.Builder
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimSpace(line)
-			if after, found := strings.CutPrefix(line, "data:"); found {
-				out.WriteString(strings.TrimSpace(after))
-				out.WriteByte('\n')
+	for s.pos >= len(s.buf) {
+		if !s.scanner.Scan() {
+			if err := s.scanner.Err(); err != nil {
+				return 0, err
 			}
+			return 0, io.EOF
 		}
-		s.buf = []byte(out.String())
+		line := strings.TrimSpace(s.scanner.Text())
+		after, found := strings.CutPrefix(line, "data:")
+		if !found || strings.TrimSpace(after) == "" {
+			// keep-alive, comment, or blank separator — loop to the next line
+			// rather than returning (0, nil), which would trigger ErrNoProgress.
+			continue
+		}
+		s.buf = append([]byte(strings.TrimSpace(after)), '\n')
 		s.pos = 0
-		if len(s.buf) == 0 {
-			return 0, nil
-		}
 	}
 	n := copy(p, s.buf[s.pos:])
 	s.pos += n

@@ -133,11 +133,18 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		defer func() { _ = metricsSrv.Close() }()
 	}
 
+	// Two-level context: the outer cancel is passed to the interceptor so that
+	// on_error:halt can stop the proxy by cancelling it; the inner signal context
+	// layers SIGINT/SIGTERM on top. Cancelling the outer propagates to the inner.
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+
 	interceptor, err := enforce.New(enforce.Options{
 		Server:   server.Name,
 		Engine:   engine,
 		Recorder: recorder,
 		Approver: approver,
+		Cancel:   baseCancel,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcpguard: %v\n", err)
@@ -154,7 +161,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Signals must reach the child, or Ctrl-C orphans the MCP server.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(baseCtx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Diagnostics go to stderr because stdout is the MCP channel — a stray
