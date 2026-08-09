@@ -19,10 +19,12 @@ lint:
 	golangci-lint run
 
 # Each fuzz target gets a bounded run in CI; longer local runs are manual.
+# Count-based fuzz time (-Nx) avoids the context.DeadlineExceeded failure that
+# Go 1.21+ produces when duration-based fuzz time expires via context.WithDeadline.
 fuzz:
-	go test -run='^$$' -fuzz=FuzzPathCanonicalization -fuzztime=60s ./internal/canon
-	go test -run='^$$' -fuzz=FuzzMatcherMatch -fuzztime=60s ./internal/policy
-	go test -run='^$$' -fuzz=FuzzDecodeMessage -fuzztime=60s ./internal/protocol
+	go test -run='^$$' -fuzz=FuzzPathCanonicalization -fuzztime=2000000x ./internal/canon
+	go test -run='^$$' -fuzz=FuzzMatcherMatch -fuzztime=500000x ./internal/policy
+	go test -run='^$$' -fuzz=FuzzDecodeMessage -fuzztime=500000x ./internal/protocol
 
 cover:
 	go test -race -coverprofile=coverage.out -covermode=atomic $(PKGS)
