@@ -217,9 +217,10 @@ func FindBypasses(e *policy.Engine, pt *policy.PolicyTest) []Bypass {
 // canonicalTool returns the canonical form of a Tool field value for
 // re-evaluation after a tool-mutation bypass candidate is found.
 //
-// For file:// URIs the path is cleaned and traversal elements cause the
-// function to return the empty string, which matches nothing. For other
-// strings canon.Path is applied as a best-effort normalization.
+// Only file:// URIs and absolute paths have a meaningful canonical form.
+// Plain tool names (e.g. "get_pods") are returned unchanged: a wildcard glob
+// such as "get_*" matching "get_pods/../.." is the glob being broad by design,
+// not a bypass, and reporting it would be a false positive.
 func canonicalTool(tool string) string {
 	if strings.HasPrefix(tool, "file://") {
 		p, err := canon.FileURIPath(tool)
@@ -228,16 +229,26 @@ func canonicalTool(tool string) string {
 		}
 		return "file://" + p
 	}
-	canonical, err := canon.Path(tool)
-	if err != nil {
-		return ""
+	if strings.HasPrefix(tool, "/") {
+		canonical, err := canon.Path(tool)
+		if err != nil {
+			return ""
+		}
+		return canonical
 	}
-	return canonical
+	// Not a path or URI: no canonical form; return as-is so the re-evaluation
+	// uses the same value as the raw evaluation.
+	return tool
 }
 
-// canonicalStringArgs returns a copy of args with every string value replaced
-// by its canonical filesystem-path form, or by the empty string when
-// canonicalisation fails (traversal element, NUL byte, relative path, etc.).
+// canonicalStringArgs returns a copy of args with path-like string values
+// replaced by their canonical filesystem-path form.
+//
+// Only strings that are clearly paths (absolute paths starting with "/" or
+// file:// URIs) are canonicalized. Other strings — enum values, namespace
+// names, free-form text — are passed through unchanged. Canonicalizing them
+// as filesystem paths would produce empty-string substitutions that change the
+// policy decision for unrelated reasons, creating false-positive bypass reports.
 //
 // The result is used to re-evaluate a mutation: if the canonical form is also
 // allowed, the mutation is within scope; if it is denied, the raw form
@@ -245,14 +256,28 @@ func canonicalTool(tool string) string {
 func canonicalStringArgs(args map[string]any) map[string]any {
 	out := make(map[string]any, len(args))
 	for k, v := range args {
-		if s, ok := v.(string); ok {
+		s, ok := v.(string)
+		if !ok {
+			out[k] = v
+			continue
+		}
+		switch {
+		case strings.HasPrefix(s, "file://"):
+			p, err := canon.FileURIPath(s)
+			if err != nil {
+				out[k] = ""
+			} else {
+				out[k] = "file://" + p
+			}
+		case strings.HasPrefix(s, "/"):
 			if canonical, err := canon.Path(s); err == nil {
 				out[k] = canonical
 			} else {
 				out[k] = ""
 			}
-		} else {
-			out[k] = v
+		default:
+			// Not a path: leave unchanged so it does not affect the re-evaluation.
+			out[k] = s
 		}
 	}
 	return out

@@ -147,6 +147,56 @@ rules: []
 	}
 }
 
+func TestFindBypassesDoesNotFlagWildcardToolGlobs(t *testing.T) {
+	// Regression: tool mutations like get_pods/../../etc/shadow match a "get_*"
+	// glob (GlobMatch treats * as matching /). Old canonicalTool applied canon.Path
+	// to the mutated name, got an error, returned "", which matched nothing and was
+	// reported as a bypass. The fix: non-path tool names are returned unchanged so
+	// the canonical re-evaluation uses the same broad glob, not "".
+	e := engineFor(t, `
+version: v1
+servers: [{name: k8s, transport: stdio, command: ["true"]}]
+rules:
+  - name: read-resources
+    servers: [k8s]
+    tools: ["get_*", "list_*"]
+    action: allow
+`)
+	pt := &policy.PolicyTest{Cases: []policy.Case{{
+		Name: "get pods", Server: "k8s", Tool: "get_pods",
+		Args: map[string]any{"namespace": "default"}, Expect: policy.ActionAllow,
+	}}}
+
+	if got := FindBypasses(e, pt); len(got) != 0 {
+		t.Errorf("wildcard tool policy should have no bypasses, found: %+v", got)
+	}
+}
+
+func TestCanonicalStringArgsPreservesNonPathStrings(t *testing.T) {
+	// Non-path strings must pass through unchanged so they do not affect
+	// the policy re-evaluation decision.
+	in := map[string]any{
+		"namespace": "default",
+		"path":      "/srv/data/public/a.txt",
+		"bad":       "/srv/../etc/shadow",
+		"count":     float64(3),
+	}
+	out := canonicalStringArgs(in)
+
+	if out["namespace"] != "default" {
+		t.Errorf("namespace = %q, want \"default\"", out["namespace"])
+	}
+	if out["path"] != "/srv/data/public/a.txt" {
+		t.Errorf("path = %q, want clean absolute path", out["path"])
+	}
+	if out["bad"] != "" {
+		t.Errorf("traversal path = %q, want \"\"", out["bad"])
+	}
+	if out["count"] != float64(3) {
+		t.Errorf("count = %v, want 3", out["count"])
+	}
+}
+
 func engineFor(t *testing.T, yaml string) *policy.Engine {
 	t.Helper()
 	cfg, err := policy.Load(strings.NewReader(yaml))
