@@ -127,10 +127,17 @@ func (p *proxy) servePost(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = upstreamResp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, protocol.MaxMessageBytes))
+	// Use +1 so a response exactly at the limit is not silently truncated —
+	// the same sentinel the inbound path uses (line 91).
+	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, protocol.MaxMessageBytes+1))
 	if err != nil {
 		writeMessage(w, http.StatusOK, protocol.ErrorResponse(m.ID,
 			protocol.CodeInternalError, "cannot read upstream response", nil))
+		return
+	}
+	if len(respBody) > protocol.MaxMessageBytes {
+		writeMessage(w, http.StatusOK, protocol.ErrorResponse(m.ID,
+			protocol.CodeInternalError, "upstream response too large", nil))
 		return
 	}
 

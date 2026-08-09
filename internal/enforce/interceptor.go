@@ -157,7 +157,9 @@ func (i *Interceptor) handleToolsCall(ctx context.Context, m *protocol.Message) 
 		Decision: decision, Mode: i.engine.Config().Mode, Latency: time.Since(start),
 	}
 
-	if decision.Action == policy.ActionApprove {
+	// Audit mode observes without blocking: skip approval wait, finish will
+	// forward regardless of the decision.
+	if decision.Action == policy.ActionApprove && i.engine.Config().Mode != policy.ModeAudit {
 		ev = i.resolveApproval(ctx, ev)
 	}
 
@@ -217,7 +219,9 @@ func (i *Interceptor) handleResourcesRead(ctx context.Context, m *protocol.Messa
 		Server: i.server, Method: m.Method, Tool: toolURI, Mode: i.engine.Config().Mode,
 		Decision: decision, Latency: time.Since(start),
 	}
-	if decision.Action == policy.ActionApprove {
+	// Audit mode observes without blocking: skip approval wait, finish will
+	// forward regardless of the decision.
+	if decision.Action == policy.ActionApprove && i.engine.Config().Mode != policy.ModeAudit {
 		ev = i.resolveApproval(ctx, ev)
 	}
 	return i.finish(m, ev)
